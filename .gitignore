@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Output and downloaded assets (huge files, should not be committed)
+output/
+assets/chromakey/*
+assets/backgrounds/*
+assets/music/*
+assets/stream_clips/
+!assets/chromakey/.gitkeep
+!assets/backgrounds/.gitkeep
+!assets/music/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
