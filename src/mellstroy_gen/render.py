@@ -1,18 +1,23 @@
 """Низкоуровневые помощники: рендер субтитров (PIL → PNG) и композиция через FFmpeg.
 
 Финальный формат: 1080x1920 (9:16), 30 fps, H.264, AAC.
+Поддерживает MontageStyle для разнообразия визуального оформления и
+автоматический детект зелёного фона (chromakey vs. обычный overlay).
 """
 from __future__ import annotations
 
 import json
+import logging
 import shlex
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 from PIL import Image, ImageDraw, ImageFont
+
+from .styles import MontageStyle
+
+log = logging.getLogger(__name__)
 
 W, H = 1080, 1920
 FPS = 30
@@ -40,15 +45,13 @@ def render_caption(
     width: int = W - 80,
     max_lines: int = 3,
     font_size: int = 80,
+    fill_color: tuple[int, int, int] = (255, 255, 255),
+    stroke_color: tuple[int, int, int] = (0, 0, 0),
 ) -> Path:
-    """Рендерит крупную TikTok-стилизованную надпись на прозрачном PNG.
-
-    Стиль: белый текст с чёрной обводкой, разбит по словам по строкам.
-    """
+    """Рендерит крупную TikTok-стилизованную надпись на прозрачном PNG."""
     font_path = _find_font()
     font = ImageFont.truetype(font_path, font_size)
 
-    # переносим по словам, чтоб каждая строка <= width
     words = text.split()
     lines: list[str] = []
     cur = ""
@@ -66,7 +69,6 @@ def render_caption(
         lines.append(cur)
     lines = lines[:max_lines]
 
-    # размер картинки
     line_h = int(font_size * 1.15)
     pad = 30
     img_h = line_h * len(lines) + pad * 2
@@ -74,19 +76,20 @@ def render_caption(
     draw = ImageDraw.Draw(img)
 
     stroke_w = max(4, font_size // 14)
+    fill_rgba = (*fill_color, 255)
+    stroke_rgba = (*stroke_color, 255)
     for i, line in enumerate(lines):
         bbox = draw.textbbox((0, 0), line, font=font)
         tw = bbox[2] - bbox[0]
         x = (W - tw) // 2
         y = pad + i * line_h
-        # белый текст с чёрной обводкой
         draw.text(
             (x, y),
             line,
             font=font,
-            fill=(255, 255, 255, 255),
+            fill=fill_rgba,
             stroke_width=stroke_w,
-            stroke_fill=(0, 0, 0, 255),
+            stroke_fill=stroke_rgba,
         )
 
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -124,24 +127,55 @@ def probe_has_audio(path: Path) -> bool:
 
 @dataclass
 class CompositionInputs:
-    chromakey: Path           # mp4 c Меллстроем на зелёном
-    background: Path          # длинное gameplay-видео (Subway/Minecraft)
-    bg_offset: float          # с какой секунды резать background
-    duration: float           # длительность финального ролика
-    caption_png: Path         # PNG с субтитром (прозрачный фон)
-    music: Path | None        # фоновый звук (низкая громкость) либо None
-    out: Path                 # путь финального .mp4
+    chromakey: Path
+    background: Path
+    bg_offset: float
+    duration: float
+    caption_png: Path
+    music: Path | None
+    out: Path
+    use_chromakey: bool = True
+    style: MontageStyle | None = None
+
+
+def _fg_scale_height(style: MontageStyle) -> int:
+    return int(1500 * style.mellstroy_scale)
+
+
+def _fg_overlay_expr(style: MontageStyle) -> str:
+    """Возвращает выражение overlay x:y для позиции Меллстроя."""
+    if style.mellstroy_position == "left":
+        return "0:(H-h)/2+80"
+    if style.mellstroy_position == "right":
+        return "W-w:(H-h)/2+80"
+    return "(W-w)/2:(H-h)/2+80"
+
+
+def _subtitle_overlay_expr(style: MontageStyle) -> str:
+    """Возвращает выражение overlay для позиции субтитра."""
+    if style.subtitle_position == "center":
+        return "(W-w)/2:(H-h)/2"
+    if style.subtitle_position == "bottom":
+        return "(W-w)/2:H*0.80"
+    return "(W-w)/2:H*0.10"
+
+
+def _build_effect_filter(style: MontageStyle) -> str:
+    """Возвращает дополнительный FFmpeg-фильтр для эффекта (применяется к [outv])."""
+    if style.effect == "zoom_in":
+        return ",zoompan=z='min(zoom+0.0008\\,1.15)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=30"
+    if style.effect == "shake":
+        return ",crop=in_w-20:in_h-20:10*sin(n*0.5):5*cos(n*0.7),scale=1080:1920:flags=lanczos"
+    if style.effect == "flash":
+        return ",eq=brightness=if(lt(n\\,3)\\,0.3\\,0)"
+    return ""
 
 
 def compose(inputs: CompositionInputs) -> Path:
     """FFmpeg-композиция: gameplay фон + Меллстрой сверху + субтитры + аудио."""
+    style = inputs.style or MontageStyle()
     has_chromakey_audio = probe_has_audio(inputs.chromakey)
 
-    # видеограф:
-    # [0:v] background → trim, scale до 1080x1920 с crop по центру
-    # [1:v] chromakey → масштабируем до ширины 1080, удаляем зелёный, alpha
-    # [2:v] caption_png  → overlay сверху примерно на 1/4 высоты
-    # output: 1080x1920 9:16
     music_path = inputs.music if inputs.music and inputs.music.exists() else None
     inputs_ff = [
         "-ss", f"{inputs.bg_offset:.2f}", "-t", f"{inputs.duration:.2f}",
@@ -152,25 +186,41 @@ def compose(inputs: CompositionInputs) -> Path:
     if music_path:
         inputs_ff += ["-stream_loop", "-1", "-i", str(music_path)]
 
-    fc = (
-        # bg: scale так чтоб закрыть 1080x1920, crop по центру (zoom-in)
+    fg_h = _fg_scale_height(style)
+    fg_overlay = _fg_overlay_expr(style)
+    sub_overlay = _subtitle_overlay_expr(style)
+
+    bg_filter = (
         "[0:v]scale=if(gt(a\\,1080/1920)\\,-2\\,1080):if(gt(a\\,1080/1920)\\,1920\\,-2):flags=lanczos,"
         "crop=1080:1920,setsar=1,fps=30,format=yuv420p[bg];"
-        # chromakey: чистим зелёный (chromakey + despill через colorchannelmixer),
-        # затем scale так чтоб Меллстрой занимал большую часть кадра, центр-crop по горизонтали
-        "[1:v]chromakey=0x00FF00:0.20:0.12,"
-        "scale=-2:1500:flags=lanczos,"
-        "crop=min(in_w\\,1080):1500:(in_w-min(in_w\\,1080))/2:0,"
-        "setsar=1,fps=30[fg];"
-        # bg + fg: Меллстрой посажен чуть ниже центра экрана
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2+80:format=auto[v1];"
-        # subtitle overlay на 10% от верха
-        "[v1][2:v]overlay=(W-w)/2:H*0.10[outv]"
+    )
+
+    if inputs.use_chromakey:
+        fg_filter = (
+            f"[1:v]chromakey=0x00FF00:0.20:0.12,"
+            f"scale=-2:{fg_h}:flags=lanczos,"
+            f"crop=min(in_w\\,1080):{fg_h}:(in_w-min(in_w\\,1080))/2:0,"
+            f"setsar=1,fps=30[fg];"
+        )
+    else:
+        fg_filter = (
+            f"[1:v]scale=-2:{fg_h}:flags=lanczos,"
+            f"crop=min(in_w\\,1080):{fg_h}:(in_w-min(in_w\\,1080))/2:0,"
+            f"setsar=1,fps=30[fg];"
+        )
+
+    effect_filter = _build_effect_filter(style)
+
+    fc = (
+        bg_filter
+        + fg_filter
+        + f"[bg][fg]overlay={fg_overlay}:format=auto[v1];"
+        + f"[v1][2:v]overlay={sub_overlay}[outv_raw];"
+        + f"[outv_raw]null{effect_filter}[outv]"
     )
 
     map_args = ["-map", "[outv]"]
 
-    # аудио микс
     if has_chromakey_audio and music_path:
         fc += ";[1:a]volume=1.0[a1];[3:a]volume=0.18[a2];[a1][a2]amix=inputs=2:duration=first:dropout_transition=0[outa]"
         map_args += ["-map", "[outa]"]
@@ -180,7 +230,6 @@ def compose(inputs: CompositionInputs) -> Path:
     elif music_path:
         fc += ";[3:a]volume=0.6[outa]"
         map_args += ["-map", "[outa]"]
-    # else: без звука (плохо, FFmpeg добавит пустой)
 
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error", "-stats",
@@ -195,6 +244,6 @@ def compose(inputs: CompositionInputs) -> Path:
         str(inputs.out),
     ]
     inputs.out.parent.mkdir(parents=True, exist_ok=True)
-    print("$", " ".join(shlex.quote(c) for c in cmd))
+    log.info("$ %s", " ".join(shlex.quote(c) for c in cmd))
     subprocess.run(cmd, check=True)
     return inputs.out

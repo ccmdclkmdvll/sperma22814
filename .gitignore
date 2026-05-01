@@ -13,9 +13,14 @@ assets/chromakey/*
 assets/backgrounds/*
 assets/music/*
 assets/stream_clips/
+assets/sticker_raw/
 !assets/chromakey/.gitkeep
 !assets/backgrounds/.gitkeep
 !assets/music/.gitkeep
+
+# Data (humor DB — generated locally, can be large)
+data/humor_db.json
+!data/.gitkeep
 
 # OS
 .DS_Store

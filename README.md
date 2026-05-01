@@ -4,9 +4,13 @@
 
 Один запуск → N готовых 9:16 (1080×1920) видео в папке `output/`. Без ручной правки.
 
-```
+```bash
+# Обычный режим (захардкоженные фразы)
 python -m mellstroy_gen.generate --count 100 --geo RU
-python -m mellstroy_gen.generate --count 100 --geo DE
+
+# Smart-режим (AI-фразы + AI-стили через Gemini)
+export GEMINI_API_KEY="твой_ключ"
+python -m mellstroy_gen.generate --count 50 --geo RU --smart
 ```
 
 ---
@@ -16,19 +20,28 @@ python -m mellstroy_gen.generate --count 100 --geo DE
 ```
 mellstroy-meme-gen/
 ├── src/mellstroy_gen/
-│   ├── sources.py            ← каталог источников (greenscreenhub, telegram-стикеры, kick-аккаунты)
-│   ├── captions.py           ← базы фраз RU и DE + хэштеги по ГЕО
-│   ├── render.py             ← FFmpeg-композиция + PIL-субтитры
+│   ├── generate.py           ← главный пайплайн (обычный + --smart AI-режим)
+│   ├── render.py             ← FFmpeg-композиция + PIL-субтитры + MontageStyle
+│   ├── captions.py           ← базы фраз RU и DE + хэштеги по ГЕО (fallback)
+│   ├── sources.py            ← каталог источников
+│   ├── learn.py              ← парсер мемов: ссылка → анализ → база знаний
+│   ├── humor_db.py           ← локальная база выученных мем-паттернов
+│   ├── ai_captions.py        ← Gemini: генерация фраз на основе базы
+│   ├── ai_style.py           ← Gemini: подбор стиля монтажа
+│   ├── styles.py             ← 10+ предустановленных стилей (позиции, цвета, эффекты)
+│   ├── green_detect.py       ← авто-детект зелёного фона (без AI)
 │   ├── collect_chromakey.py  ← скачивает .mp4 с greenscreenhub (Google Drive)
 │   ├── collect_stickers.py   ← скачивает Telegram-стикерпаки (Bot API)
-│   ├── collect_streams.py    ← скачивает свежие стримы / клипы Меллстроя с Kick (yt-dlp)
-│   ├── auto_cut.py           ← Whisper + детект пиков → авто-нарезки длинного стрима
-│   └── generate.py           ← главный пайплайн
+│   ├── collect_streams.py    ← скачивает стримы / клипы с Kick (yt-dlp)
+│   ├── collect_backgrounds.py ← авто-скачка gameplay-видео
+│   └── auto_cut.py           ← Whisper + детект пиков → авто-нарезки
 ├── assets/
-│   ├── chromakey/            ← клипы Меллстроя (зелёный фон или просто короткие нарезки)
-│   ├── backgrounds/          ← gameplay-видео (Subway Surfers / Minecraft parkour, 5–10 минут)
+│   ├── chromakey/            ← клипы Меллстроя
+│   ├── backgrounds/          ← gameplay-видео
 │   └── music/                ← опц. фоновая музыка
-├── output/                   ← готовые .mp4 + .txt с описанием/хэштегами
+├── data/
+│   └── humor_db.json         ← база выученных мем-паттернов (создаётся автоматически)
+├── output/                   ← готовые .mp4 + .txt
 ├── tests/
 │   └── test_smoke.py
 └── requirements.txt
@@ -48,7 +61,7 @@ mellstroy-meme-gen/
 ### 2. Python 3.10+ и зависимости
 
 ```bash
-git clone https://github.com/<your-account>/mellstroy-meme-gen.git
+git clone https://github.com/Pionerpinersa/mellstroy-meme-gen.git
 cd mellstroy-meme-gen
 python -m venv .venv
 # Linux/macOS
@@ -105,13 +118,15 @@ Whisper транскрибирует речь, детектит пики гро�
 
 ### B. Background gameplay
 
-Скачай 5–15 минутный ролик типа Subway Surfers / Minecraft Parkour / GTA / Truck Driver
-и положи в `assets/backgrounds/` под любым именем (например, `subway_long.mp4`).
-
-Скачать с YouTube:
+**Автоматически (рекомендуется):**
 ```bash
-yt-dlp -f "best[height<=720]" -o assets/backgrounds/%(title).40s.%(ext)s \
-  "https://www.youtube.com/watch?v=ВИДЕО_ID"
+python -m mellstroy_gen.collect_backgrounds --all
+```
+Скачает Subway Surfers, Minecraft parkour, GTA driving, satisfying-видео.
+
+**Вручную (конкретное видео):**
+```bash
+python -m mellstroy_gen.collect_backgrounds --url "https://youtube.com/watch?v=..." --name subway
 ```
 
 ### C. (Опционально) Музыка
@@ -123,28 +138,60 @@ yt-dlp -f "best[height<=720]" -o assets/backgrounds/%(title).40s.%(ext)s \
 
 ## Генерация
 
+### Обычный режим (без AI)
 ```bash
-# 100 видео для русскоязычной TikTok-аудитории
 python -m mellstroy_gen.generate --count 100 --geo RU
-
-# 100 видео под Германию
 python -m mellstroy_gen.generate --count 100 --geo DE
 ```
+
+### Smart-режим (AI через Gemini)
+```bash
+export GEMINI_API_KEY="твой_ключ"  # бесплатно: https://aistudio.google.com/apikey
+python -m mellstroy_gen.generate --count 50 --geo RU --smart
+```
+
+Smart-режим:
+1. Берёт паттерны из `data/humor_db.json` (база выученного юмора)
+2. Gemini генерирует уникальные мем-фразы батчем (1 запрос на все 50)
+3. Gemini подбирает стиль монтажа для каждого видео
+4. Авто-детект зелёного фона (chromakey vs. обычный overlay)
+5. Расход: ~7 запросов из 1500 бесплатных/день
 
 Что получишь в `output/`:
 ```
 RU_0001.mp4   ← готовое 1080×1920, 30 fps, H.264 + AAC
-RU_0001.txt   ← готовое описание/хэштеги, копи-пасть в TikTok
-RU_0002.mp4
-RU_0002.txt
+RU_0001.txt   ← описание/хэштеги для TikTok
 ...
 ```
 
 Параметры:
 - `--count N` — сколько видео (рекомендую 50–100 за прогон)
 - `--geo {RU, DE}` — ГЕО, определяет язык субтитров и хэштеги
+- `--smart` — AI-режим (нужен `GEMINI_API_KEY`)
+- `--no-ai` — в smart-режиме использовать рандомные стили без Gemini
 - `--seed N` — для воспроизводимости комбинаций
-- `--start-idx 101` — продолжить нумерацию (если уже есть RU_0001…RU_0100)
+- `--start-idx 101` — продолжить нумерацию
+
+---
+
+## Обучение на мемах
+
+Скорми AI залетевшие ролики — он проанализирует юмор и будет генерировать
+фразы в стиле того, что реально набирает просмотры:
+
+```bash
+# Скормить залетевший мем
+python -m mellstroy_gen.learn "https://www.tiktok.com/@user/video/12345"
+
+# Скормить список из файла
+python -m mellstroy_gen.learn urls.txt
+
+# Посмотреть что в базе
+python -m mellstroy_gen.learn --show
+```
+
+Чем больше мемов скормишь — тем точнее AI подбирает фразы и стиль.
+Всё хранится локально в `data/humor_db.json`.
 
 ---
 
