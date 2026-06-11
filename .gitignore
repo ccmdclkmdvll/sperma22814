@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Output and downloaded assets (huge files, should not be committed)
+output/
+assets/chromakey/*
+assets/backgrounds/*
+assets/music/*
+assets/stream_clips/
+assets/sticker_raw/
+!assets/chromakey/.gitkeep
+!assets/backgrounds/.gitkeep
+!assets/music/.gitkeep
+
+# Data (humor DB — generated locally, can be large)
+data/humor_db.json
+!data/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
